@@ -1,0 +1,162 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SpaceXI</title>
+<style>
+  body{margin:0;overflow:hidden;background:#101418}
+  #ui{position:fixed;top:10px;left:10px;color:#fff;font:14px sans-serif}
+</style>
+</head>
+<body>
+<div id="ui">
+  <button id="play">Pause</button>
+  <input type="range" id="seek" min="0" max="1000" value="0" style="width:300px;vertical-align:middle">
+  <select id="speed">
+    <option value="0.5">0.5x</option>
+    <option value="1" selected>1x</option>
+    <option value="2">2x</option>
+    <option value="4">4x</option>
+  </select>
+  <span id="clock"></span>
+</div>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101418);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 60, 70);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+new OrbitControls(camera, renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x335533, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1);
+sun.position.set(30, 80, 20);
+scene.add(sun);
+
+// Pitch (x = length, z = -y)
+const grass = new THREE.Mesh(
+  new THREE.PlaneGeometry(105, 68),
+  new THREE.MeshStandardMaterial({color: 0x2e7d32}));
+grass.rotation.x = -Math.PI / 2;
+scene.add(grass);
+
+const pts = [];
+const seg = (x1, y1, x2, y2) => pts.push(x1, 0.03, -y1, x2, 0.03, -y2);
+const rect = (x1, y1, x2, y2) => {
+  seg(x1,y1,x2,y1); seg(x2,y1,x2,y2); seg(x2,y2,x1,y2); seg(x1,y2,x1,y1);
+};
+rect(-52.5, -34, 52.5, 34);
+seg(0, -34, 0, 34);
+for (const s of [-1, 1]) {
+  rect(s*52.5, -20.16, s*(52.5-16.5), 20.16);
+  rect(s*52.5, -9.16, s*(52.5-5.5), 9.16);
+}
+for (let i = 0; i < 48; i++) {
+  const a = i/48*Math.PI*2, b = (i+1)/48*Math.PI*2;
+  seg(9.15*Math.cos(a), 9.15*Math.sin(a), 9.15*Math.cos(b), 9.15*Math.sin(b));
+}
+const g = new THREE.BufferGeometry();
+g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+scene.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({color: 0xffffff})));
+
+// Label above player
+function makeLabel(text) {
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 64;
+  const g = c.getContext('2d');
+  g.font = 'bold 44px sans-serif';
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.lineWidth = 6; g.strokeStyle = '#000';
+  g.strokeText(text, 64, 32);
+  g.fillStyle = '#fff';
+  g.fillText(text, 64, 32);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(c), depthTest: false}));
+  s.scale.set(4, 2, 1);
+  s.position.y = 1.8;
+  return s;
+}
+
+// Data
+const { players, frames } = await (await fetch('data/match1.json')).json();
+
+const meshes = {};
+for (const [id, p] of Object.entries(players)) {
+  const m = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.4, 1.2, 4, 8),
+    new THREE.MeshStandardMaterial({color: p.team === 'home' ? 0xd32f2f : 0x1976d2}));
+  scene.add(m);
+  m.add(makeLabel(p.jersey));
+  meshes[id] = m;
+}
+const ball = new THREE.Mesh(
+  new THREE.SphereGeometry(0.35, 16, 16),
+  new THREE.MeshStandardMaterial({color: 0xffffff}));
+scene.add(ball);
+
+// Playback with interpolation
+const t0 = frames[0].t, tEnd = frames.at(-1).t;
+let t = t0, i = 0, playing = true;
+const clock = new THREE.Clock();
+const lerp = (a, b, k) => a + (b - a) * k;
+
+document.getElementById('play').onclick = e => {
+  playing = !playing;
+  e.target.textContent = playing ? 'Pause' : 'Play';
+};
+
+const seek = document.getElementById('seek');
+const speedSel = document.getElementById('speed');
+seek.oninput = () => {
+  t = t0 + (seek.value / 1000) * (tEnd - t0);
+  i = 0;
+};
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  if (playing) {
+    t += dt * Number(speedSel.value);
+    if (t >= tEnd) { t = t0; i = 0; }
+  }
+  while (i < frames.length - 2 && frames[i+1].t <= t) i++;
+
+  const fa = frames[i], fb = frames[i+1];
+  const k = Math.min(1, Math.max(0, (t - fa.t) / (fb.t - fa.t)));
+
+  for (const [id, m] of Object.entries(meshes)) {
+    const a = fa.p[id], b = fb.p[id];
+    if (!a || !b) { m.visible = false; continue; }
+    m.visible = true;
+    m.position.set(lerp(a[0], b[0], k), 1.0, -lerp(a[1], b[1], k));
+  }
+  if (fa.b && fb.b) {
+    ball.visible = true;
+    ball.position.set(lerp(fa.b[0], fb.b[0], k), 0.35, -lerp(fa.b[1], fb.b[1], k));
+  } else ball.visible = false;
+
+  seek.value = ((t - t0) / (tEnd - t0)) * 1000;
+  document.getElementById('clock').textContent = t.toFixed(1) + ' s';
+  renderer.render(scene, camera);
+}
+animate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
